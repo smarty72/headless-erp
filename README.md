@@ -16,6 +16,7 @@ Een API-first ERP voor zelfstandigen en kleine bedrijven (schilders, tuinarchite
 - **Rollen:** `owner`, `admin` en `medewerker` mogen schrijven, een `boekhouder` mag alleen lezen.
 - **Branche-flexibiliteit:** extra velden staan in `attributes jsonb` en worden beschreven in `field_definitions`. Een definitie zonder `tenant_id` is een branche-template.
 - **Facturen:** `finalize_invoice` kent een doorlopend nummer zonder gaten toe, rekent de totalen per btw-tarief uit en legt de klantgegevens vast. Daarna kan de factuur niet meer worden gewijzigd; corrigeren gaat met een creditfactuur.
+- **Artikelen en voorraad:** arbeid, materialen en overige posten in `items`, met merk, artikelcode en btw-tarief (prijzen exclusief btw). Voor materialen kun je voorraad bijhouden: `stock_movements` is een grootboek van onveranderlijke mutaties en `stock_quantity` het saldo. Materiaalverbruik op een opdracht boekt automatisch af. `low_stock_items` toont artikelen onder de minimumvoorraad.
 - **Events:** elke belangrijke wijziging komt in `events` terecht. Dat is de basis voor webhooks, notificaties en AI-kanalen.
 
 ## Lokaal ontwikkelen
@@ -50,6 +51,9 @@ npx supabase db push
 | GET | `/me/tenants` | Bedrijven waar de gebruiker lid van is, met de rol |
 | POST | `/tenants` | Nieuw bedrijf aanmaken; de aanroeper wordt owner |
 | GET/POST | `/tenants/{tenantId}/customers` | Klanten bekijken en aanmaken |
+| GET/POST | `/tenants/{tenantId}/items` | Artikelen (arbeid, materiaal); filters `kind`, `search`, `low_stock=true` |
+| PATCH | `/tenants/{tenantId}/items/{itemId}` | Artikel bijwerken (niet de voorraad) |
+| GET/POST | `/tenants/{tenantId}/items/{itemId}/stock-movements` | Voorraadmutaties bekijken en boeken (inkoop, correctie, retour) |
 | GET | `/tenants/{tenantId}/field-definitions` | Branchevelden en eigen velden van het bedrijf |
 | POST | `/tenants/{tenantId}/invoices/{invoiceId}/finalize` | Factuur definitief maken |
 

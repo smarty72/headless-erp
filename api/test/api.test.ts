@@ -84,6 +84,61 @@ describe('HeadlessERP API', () => {
     expect(keys).not.toContain('houtsoort');
   });
 
+  it('beheert artikelen en voorraad', async () => {
+    const labour = await call(anna, 'POST', `/tenants/${tenantA}/items`, {
+      kind: 'arbeid',
+      name: 'Schilderwerk',
+      unit: 'uur',
+      sale_price: 60,
+      vat_rate: 9,
+    });
+    expect(labour.status).toBe(201);
+    const labourItem = (await labour.json()) as { id: string };
+    expect(labourItem).toMatchObject({ sale_price: 60, vat_rate: 9, track_stock: false });
+
+    const paint = await call(anna, 'POST', `/tenants/${tenantA}/items`, {
+      kind: 'materiaal',
+      name: 'Alpha Rezisto Easy Clean 2,5 l',
+      brand: 'Sikkens',
+      sku: 'SIK-AR-25',
+      unit: 'stuk',
+      sale_price: 18.95,
+      track_stock: true,
+      min_stock: 5,
+    });
+    expect(paint.status).toBe(201);
+    const paintId = ((await paint.json()) as { id: string }).id;
+
+    const duplicate = await call(anna, 'POST', `/tenants/${tenantA}/items`, {
+      kind: 'materiaal', name: 'Kopie', sku: 'SIK-AR-25', unit: 'stuk', sale_price: 1,
+    });
+    expect(duplicate.status).toBe(409);
+
+    const bought = await call(anna, 'POST', `/tenants/${tenantA}/items/${paintId}/stock-movements`, {
+      quantity: 3, reason: 'inkoop', unit_cost: 12.4,
+    });
+    expect(bought.status).toBe(201);
+
+    const low = (await (await call(anna, 'GET', `/tenants/${tenantA}/items?low_stock=true`)).json()) as {
+      name: string; stock_quantity: number;
+    }[];
+    expect(low).toEqual([expect.objectContaining({ name: 'Alpha Rezisto Easy Clean 2,5 l', stock_quantity: 3 })]);
+
+    const found = (await (await call(anna, 'GET', `/tenants/${tenantA}/items?search=sikkens`)).json()) as unknown[];
+    expect(found).toHaveLength(1);
+
+    const direct = await call(anna, 'PATCH', `/tenants/${tenantA}/items/${paintId}`, { sale_price: 19.95 });
+    expect(await direct.json()).toMatchObject({ sale_price: 19.95, stock_quantity: 3 });
+
+    const noStock = await call(anna, 'POST', `/tenants/${tenantA}/items/${labourItem.id}/stock-movements`, {
+      quantity: 1, reason: 'inkoop',
+    });
+    expect(noStock.status).toBe(409);
+
+    const foreign = await call(bram, 'GET', `/tenants/${tenantA}/items`);
+    expect(await foreign.json()).toEqual([]);
+  });
+
   it('maakt een factuur definitief met doorlopend nummer', async () => {
     const db = createClient(env.supabaseUrl, env.supabaseKey, {
       global: { headers: { Authorization: `Bearer ${anna}` } },
