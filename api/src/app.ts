@@ -1,11 +1,11 @@
 import { OpenAPIHono, createRoute, z } from '@hono/zod-openapi';
 import { HTTPException } from 'hono/http-exception';
 import { requireUser, type AuthVariables } from './auth.js';
+import { cors } from 'hono/cors';
+import { env } from './env.js';
 import { dbError } from './errors.js';
-
-const Uuid = z.uuid();
-const TenantParams = z.object({ tenantId: Uuid.openapi({ param: { name: 'tenantId', in: 'path' } }) });
-const ErrorBody = z.object({ error: z.string() }).openapi('Error');
+import { registerOnboarding } from './routes/onboarding.js';
+import { ErrorBody, TenantParams, Uuid, errors } from './schemas.js';
 
 const Tenant = z
   .object({ id: Uuid, name: z.string(), industry: z.string(), role: z.string() })
@@ -118,11 +118,6 @@ const NewStockMovement = z
   .openapi('NewStockMovement');
 const ItemParams = TenantParams.extend({ itemId: Uuid.openapi({ param: { name: 'itemId', in: 'path' } }) });
 
-const errors = {
-  401: { description: 'Niet ingelogd', content: { 'application/json': { schema: ErrorBody } } },
-  403: { description: 'Geen rechten', content: { 'application/json': { schema: ErrorBody } } },
-};
-
 export function createApp() {
   const app = new OpenAPIHono<{ Variables: AuthVariables }>({
     defaultHook: (result, c) => {
@@ -136,6 +131,8 @@ export function createApp() {
     return c.json({ error: 'Interne fout' }, 500);
   });
 
+  app.use('*', cors({ origin: env.webOrigins, allowHeaders: ['Authorization', 'Content-Type'], maxAge: 600 }));
+
   app.get('/health', (c) => c.json({ ok: true }));
 
   app.doc31('/openapi.json', {
@@ -147,6 +144,10 @@ export function createApp() {
   app.use('/me/*', requireUser);
   app.use('/tenants', requireUser);
   app.use('/tenants/*', requireUser);
+  app.use('/industries', requireUser);
+  app.use('/onboarding', requireUser);
+
+  registerOnboarding(app);
 
   // Bedrijven waar de gebruiker lid van is.
   app.openapi(

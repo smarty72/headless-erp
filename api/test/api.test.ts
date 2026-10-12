@@ -139,6 +139,58 @@ describe('HeadlessERP API', () => {
     expect(await foreign.json()).toEqual([]);
   });
 
+  it('doorloopt de onboarding met logo', async () => {
+    const carla = await tokenFor('carla');
+    const industries = (await (await call(carla, 'GET', '/industries')).json()) as { key: string }[];
+    expect(industries.map((i) => i.key)).toEqual(expect.arrayContaining(['schilder', 'stukadoor', 'timmer']));
+
+    const invalid = await call(carla, 'POST', '/onboarding', { industry: 'stukadoor', name: ' ' });
+    expect(invalid.status).toBe(400);
+
+    const res = await call(carla, 'POST', '/onboarding', {
+      industry: 'stukadoor',
+      name: 'Stukadoorsbedrijf Carla',
+      contact_name: 'Carla Jansen',
+      email: 'carla@stuc.test',
+      phone: '0612345678',
+      address: { street: 'Kerkstraat 5', postal_code: '3511 AB', city: 'Utrecht' },
+      hourly_rate: 58,
+      call_out_fee: 30,
+    });
+    expect(res.status).toBe(201);
+    const tenant = (await res.json()) as { id: string; settings: { payment_days: number }; logo_url: string | null };
+    expect(tenant).toMatchObject({ settings: { payment_days: 14 }, logo_url: null });
+
+    const items = (await (await call(carla, 'GET', `/tenants/${tenant.id}/items`)).json()) as { name: string }[];
+    expect(items.map((i) => i.name).sort()).toEqual(['Uurtarief stukadoor', 'Voorrijkosten']);
+
+    const png = Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=='), (ch) => ch.charCodeAt(0));
+    const form = new FormData();
+    form.append('file', new File([png], 'logo.png', { type: 'image/png' }));
+    const upload = await app.request(`/tenants/${tenant.id}/logo`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${carla}` },
+      body: form,
+    });
+    expect(upload.status).toBe(200);
+    const withLogo = (await upload.json()) as { logo_url: string };
+    expect(withLogo.logo_url).toMatch(new RegExp(`/logos/${tenant.id}/logo-\\d+\\.png$`));
+
+    const foreignForm = new FormData();
+    foreignForm.append('file', new File([png], 'logo.png', { type: 'image/png' }));
+    const foreign = await app.request(`/tenants/${tenant.id}/logo`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${bram}` },
+      body: foreignForm,
+    });
+    expect(foreign.status).toBe(403);
+  });
+
+  it('staat de webapp toe via CORS', async () => {
+    const res = await app.request('/health', { headers: { Origin: 'http://localhost:5173' } });
+    expect(res.headers.get('access-control-allow-origin')).toBe('http://localhost:5173');
+  });
+
   it('maakt een factuur definitief met doorlopend nummer', async () => {
     const db = createClient(env.supabaseUrl, env.supabaseKey, {
       global: { headers: { Authorization: `Bearer ${anna}` } },

@@ -9,6 +9,7 @@ Een API-first ERP voor zelfstandigen en kleine bedrijven (schilders, tuinarchite
 | `supabase/migrations` | Het schema: een vaste kern, JSONB-velden per branche, Row Level Security en het definitief maken van facturen |
 | `supabase/tests/database` | pgTAP-tests die bewijzen dat bedrijven van elkaar gescheiden zijn en dat facturen kloppen |
 | `api` | Node.js-API (Hono + OpenAPI). Elke query draait met het token van de gebruiker, dus RLS geldt altijd |
+| `web` | Web-app "Vakwerk" (Vue 3, daisyUI, mobile first): inloggen, onboarding-wizard en dashboard |
 
 ## Principes
 
@@ -17,6 +18,7 @@ Een API-first ERP voor zelfstandigen en kleine bedrijven (schilders, tuinarchite
 - **Branche-flexibiliteit:** extra velden staan in `attributes jsonb` en worden beschreven in `field_definitions`. Een definitie zonder `tenant_id` is een branche-template.
 - **Facturen:** `finalize_invoice` kent een doorlopend nummer zonder gaten toe, rekent de totalen per btw-tarief uit en legt de klantgegevens vast. Daarna kan de factuur niet meer worden gewijzigd; corrigeren gaat met een creditfactuur.
 - **Artikelen en voorraad:** arbeid, materialen en overige posten in `items`, met merk, artikelcode en btw-tarief (prijzen exclusief btw). Voor materialen kun je voorraad bijhouden: `stock_movements` is een grootboek van onveranderlijke mutaties en `stock_quantity` het saldo. Materiaalverbruik op een opdracht boekt automatisch af. `low_stock_items` toont artikelen onder de minimumvoorraad.
+- **Onboarding:** branches staan als data in `industries` (met voorgesteld uurtarief en btw op arbeid). `onboard_tenant` maakt bedrijf, lidmaatschap en standaardartikelen in één transactie. Logo's staan in de Storage-bucket `logos` onder `<tenant_id>/`.
 - **Events:** elke belangrijke wijziging komt in `events` terecht. Dat is de basis voor webhooks, notificaties en AI-kanalen.
 
 ## Lokaal ontwikkelen
@@ -32,6 +34,19 @@ npm install
 npm test                    # integratietests tegen de lokale Supabase
 npm run dev                 # API op http://localhost:3000, spec op /openapi.json
 ```
+
+### Web-app
+
+```bash
+cd web
+cp .env.example .env.local  # Supabase-URL, publishable key en API-URL
+npm install
+npm run dev                 # http://localhost:5173
+```
+
+De API staat verzoeken van `WEB_ORIGIN` toe (standaard `http://localhost:5173`, meerdere origins kommagescheiden). Na het inloggen leidt de app nieuwe gebruikers naar `/welkom`: branche kiezen, bedrijfsgegevens met logo, tarieven en betaaltermijn. Daarna volgt het dashboard.
+
+Zet in Supabase onder Authentication > URL Configuration de **Site URL** op het adres van de web-app, anders wijst de bevestigingsmail naar de verkeerde plek.
 
 ## Supabase-project
 
@@ -49,6 +64,10 @@ npx supabase db push
 | GET | `/health` | Healthcheck |
 | GET | `/openapi.json` | OpenAPI 3.1-specificatie; hieruit worden clients en AI-tools gegenereerd |
 | GET | `/me/tenants` | Bedrijven waar de gebruiker lid van is, met de rol |
+| GET | `/industries` | Branches met voorgesteld uurtarief en btw op arbeid |
+| POST | `/onboarding` | Bedrijf in één keer neerzetten: gegevens, owner, uurtarief en voorrijkosten |
+| GET | `/tenants/{tenantId}` | Bedrijfsgegevens met logo-URL |
+| POST | `/tenants/{tenantId}/logo` | Logo uploaden (multipart, veld `file`, max 2 MB) |
 | POST | `/tenants` | Nieuw bedrijf aanmaken; de aanroeper wordt owner |
 | GET/POST | `/tenants/{tenantId}/customers` | Klanten bekijken en aanmaken |
 | GET/POST | `/tenants/{tenantId}/items` | Artikelen (arbeid, materiaal); filters `kind`, `search`, `low_stock=true` |

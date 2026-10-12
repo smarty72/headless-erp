@@ -20,7 +20,7 @@ jobs:
           cache-dependency-path: api/package-lock.json
 
       - name: Lokale Supabase starten
-        run: supabase start -x studio,imgproxy,realtime,storage-api,edge-runtime,logflare,vector,supavisor,mailpit,postgres-meta
+        run: supabase start -x studio,imgproxy,realtime,edge-runtime,logflare,vector,supavisor,mailpit,postgres-meta
 
       - name: Databasetests (RLS, facturen)
         run: supabase test db
@@ -32,3 +32,20 @@ jobs:
           npm ci
           npm run typecheck
           SUPABASE_URL=$API_URL SUPABASE_PUBLISHABLE_KEY=$PUBLISHABLE_KEY SUPABASE_SECRET_KEY=$SECRET_KEY npm test
+
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Web-app typecheck en build
+        run: |
+          npm ci
+          npm run build

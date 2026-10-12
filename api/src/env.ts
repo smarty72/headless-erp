@@ -9,4 +9,6 @@ export const env = {
   // Publishable (anon) key: elke query draait met het JWT van de gebruiker, dus RLS geldt altijd.
   supabaseKey: required('SUPABASE_PUBLISHABLE_KEY'),
   port: Number(process.env.PORT ?? 3000),
+  // Frontends die de API vanuit de browser mogen aanroepen (komma-gescheiden).
+  webOrigins: (process.env.WEB_ORIGIN ?? 'http://localhost:5173').split(',').map((o) => o.trim()),
 };
