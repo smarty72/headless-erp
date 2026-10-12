@@ -191,6 +191,95 @@ describe('HeadlessERP API', () => {
     expect(res.headers.get('access-control-allow-origin')).toBe('http://localhost:5173');
   });
 
+  it('doorloopt offerte, opdracht, uren, factuur en betaling', async () => {
+    const dirk = await tokenFor('dirk');
+    const onboard = await call(dirk, 'POST', '/onboarding', { industry: 'schilder', name: 'Schilder Dirk', hourly_rate: 60, payment_days: 30 });
+    const t = ((await onboard.json()) as { id: string }).id;
+    const base = `/tenants/${t}`;
+
+    const customer = (await (await call(dirk, 'POST', `${base}/customers`, {
+      name: 'Fam. Bakker', address: { street: 'Laan 1', city: 'Zeist' },
+    })).json()) as { id: string };
+    const paint = (await (await call(dirk, 'POST', `${base}/items`, {
+      kind: 'materiaal', name: 'Rubbol BL Azura', brand: 'Sikkens', unit: 'stuk', sale_price: 18.95, track_stock: true,
+    })).json()) as { id: string };
+    await call(dirk, 'POST', `${base}/items/${paint.id}/stock-movements`, { quantity: 10, reason: 'inkoop' });
+
+    // Offerte: 3 x 18,95 = 56,85 (21%) en 16 uur x 60 = 960 (9%).
+    const created = await call(dirk, 'POST', `${base}/quotes`, {
+      customer_id: customer.id,
+      title: 'Kozijnen buiten',
+      lines: [
+        { description: 'Schilderwerk kozijnen', quantity: 16, unit: 'uur', unit_price: 60, vat_rate: 9 },
+        { item_id: paint.id, description: 'Sikkens Rubbol', quantity: 3, unit: 'stuk', unit_price: 18.95, vat_rate: 21 },
+      ],
+    });
+    expect(created.status).toBe(201);
+    const quote = (await created.json()) as { id: string; total_excl: number; total_vat: number; total_incl: number };
+    expect(quote).toMatchObject({ total_excl: 1016.85, total_vat: 98.34, total_incl: 1115.19 });
+
+    const sent = (await (await call(dirk, 'POST', `${base}/quotes/${quote.id}/send`, {})).json()) as { number: string; status: string };
+    expect(sent).toMatchObject({ number: `O${new Date().getFullYear()}-0001`, status: 'verzonden' });
+    expect((await call(dirk, 'PATCH', `${base}/quotes/${quote.id}`, { title: 'Anders' })).status).toBe(409);
+
+    const accepted = await call(dirk, 'POST', `${base}/quotes/${quote.id}/accept`, {});
+    expect(accepted.status).toBe(201);
+    const { job_id } = (await accepted.json()) as { job_id: string };
+
+    // Aan het werk: timer starten en stoppen.
+    const started = await call(dirk, 'POST', `${base}/timer/start`, { job_id });
+    expect(started.status).toBe(201);
+    expect(await started.json()).toMatchObject({ job: { id: job_id, title: 'Kozijnen buiten', customer: { name: 'Fam. Bakker' } } });
+    const stopped = (await (await call(dirk, 'POST', `${base}/timer/stop`)).json()) as { hours: number };
+    expect(stopped.hours).toBe(0.25);
+    expect(await (await call(dirk, 'GET', `${base}/timer`)).json()).toEqual({ timer: null });
+
+    // Meerwerk factureerbaar, materiaal uit voorraad.
+    await call(dirk, 'POST', `${base}/jobs/${job_id}/time-entries`, { hours: 2, billable: true, note: 'Meerwerk' });
+    const withMaterial = await call(dirk, 'POST', `${base}/jobs/${job_id}/materials`, { item_id: paint.id, quantity: 1, billable: true });
+    expect(withMaterial.status).toBe(201);
+    const job = (await withMaterial.json()) as { status: string; total_hours: number; uninvoiced_billable_hours: number; materials: { description: string }[] };
+    expect(job).toMatchObject({ status: 'bezig', total_hours: 2.25, uninvoiced_billable_hours: 2 });
+    expect(job.materials[0].description).toBe('Sikkens Rubbol BL Azura');
+    const stock = (await (await call(dirk, 'GET', `${base}/items/${paint.id}`)).json()) as { stock_quantity: number };
+    expect(stock.stock_quantity).toBe(9);
+
+    const inv = await call(dirk, 'POST', `${base}/jobs/${job_id}/invoice`);
+    expect(inv.status).toBe(201);
+    const { invoice_id } = (await inv.json()) as { invoice_id: string };
+    const draft = (await (await call(dirk, 'GET', `${base}/invoices/${invoice_id}`)).json()) as {
+      lines: { id: string; description: string; quantity: number; unit: string; unit_price: number; vat_rate: number }[];
+    };
+    expect(draft.lines.map((l) => l.description)).toEqual(['Schilderwerk kozijnen', 'Sikkens Rubbol', 'Uurtarief schilder', 'Sikkens Rubbol BL Azura']);
+
+    // Laatste regel weghalen en een eigen regel toevoegen.
+    const edited = await call(dirk, 'PATCH', `${base}/invoices/${invoice_id}`, {
+      lines: [...draft.lines.slice(0, 3), { description: 'Voorrijkosten', quantity: 1, unit: 'keer', unit_price: 25, vat_rate: 21 }],
+    });
+    expect(edited.status).toBe(200);
+
+    const final = await call(dirk, 'POST', `${base}/invoices/${invoice_id}/finalize`);
+    expect(final.status).toBe(200);
+    const finalized = (await final.json()) as { number: string; status: string; issued_on: string; due_on: string; total_incl: number; open_amount: number };
+    expect(finalized.status).toBe('definitief');
+    expect((Date.parse(finalized.due_on) - Date.parse(finalized.issued_on)) / 86_400_000).toBe(30);
+    expect(finalized.open_amount).toBe(finalized.total_incl);
+    expect(((await (await call(dirk, 'GET', `${base}/jobs/${job_id}`)).json()) as { status: string }).status).toBe('gefactureerd');
+
+    const overview = (await (await call(dirk, 'GET', `${base}/overview`)).json()) as { unpaid_invoices: number; unpaid_amount: number; open_jobs: number };
+    expect(overview).toMatchObject({ unpaid_invoices: 1, unpaid_amount: finalized.total_incl, open_jobs: 0 });
+
+    const paid = (await (await call(dirk, 'POST', `${base}/invoices/${invoice_id}/payments`, { amount: finalized.total_incl })).json()) as { status: string; open_amount: number };
+    expect(paid).toMatchObject({ status: 'betaald', open_amount: 0 });
+
+    const detail = (await (await call(dirk, 'GET', `${base}/customers/${customer.id}`)).json()) as { quotes: unknown[]; jobs: unknown[]; invoices: unknown[] };
+    expect([detail.quotes.length, detail.jobs.length, detail.invoices.length]).toEqual([1, 1, 1]);
+
+    // Een ander bedrijf ziet hier niets van.
+    expect(await (await call(bram, 'GET', `${base}/quotes`)).json()).toEqual([]);
+    expect((await call(bram, 'GET', `${base}/jobs/${job_id}`)).status).toBe(404);
+  });
+
   it('maakt een factuur definitief met doorlopend nummer', async () => {
     const db = createClient(env.supabaseUrl, env.supabaseKey, {
       global: { headers: { Authorization: `Bearer ${anna}` } },

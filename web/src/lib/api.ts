@@ -47,6 +47,161 @@ export type TenantDetails = {
   email: string | null;
   phone: string | null;
   address: Address | null;
+  kvk_number: string | null;
+  vat_number: string | null;
+  iban: string | null;
   settings: Record<string, unknown>;
   logo_url: string | null;
 };
+
+export type TenantFull = TenantDetails;
+
+export type Ref = { id: string; name: string };
+export type VatRate = 0 | 9 | 21;
+
+export type Customer = {
+  id: string;
+  kind: 'particulier' | 'zakelijk';
+  name: string;
+  email: string | null;
+  phone: string | null;
+  vat_number: string | null;
+  address: Address | null;
+};
+export type CustomerDetail = Customer & {
+  quotes: { id: string; number: string | null; title: string | null; status: QuoteStatus; created_at: string }[];
+  jobs: { id: string; title: string; status: JobStatus; created_at: string }[];
+  invoices: { id: string; number: string | null; status: InvoiceStatus; total_incl: number | null; created_at: string }[];
+};
+
+export type ItemKind = 'arbeid' | 'materiaal' | 'overig';
+export type Item = {
+  id: string;
+  kind: ItemKind;
+  name: string;
+  brand: string | null;
+  sku: string | null;
+  unit: string;
+  purchase_price: number | null;
+  sale_price: number;
+  vat_rate: number;
+  track_stock: boolean;
+  stock_quantity: number;
+  min_stock: number | null;
+};
+export type StockMovement = {
+  id: number;
+  quantity: number;
+  reason: 'beginvoorraad' | 'inkoop' | 'verbruik' | 'correctie' | 'retour';
+  job_id: string | null;
+  note: string | null;
+  created_at: string;
+};
+
+export type Line = {
+  id?: string;
+  item_id?: string | null;
+  description: string;
+  quantity: number;
+  unit: string;
+  unit_price: number;
+  vat_rate: VatRate;
+};
+export type Totals = {
+  total_excl: number;
+  total_vat: number;
+  total_incl: number;
+  vat_breakdown: { rate: number; excl: number; vat: number }[];
+};
+
+export type QuoteStatus = 'concept' | 'verzonden' | 'geaccepteerd' | 'afgewezen' | 'verlopen';
+export type QuoteSummary = {
+  id: string;
+  number: string | null;
+  title: string | null;
+  status: QuoteStatus;
+  valid_until: string | null;
+  created_at: string;
+  customer: Ref;
+  total_incl: number;
+};
+export type Quote = Omit<QuoteSummary, 'total_incl'> &
+  Totals & { notes: string | null; lines: Line[]; job_id: string | null };
+
+export type JobStatus = 'gepland' | 'bezig' | 'opgeleverd' | 'gefactureerd' | 'geannuleerd';
+export type JobSummary = {
+  id: string;
+  title: string;
+  status: JobStatus;
+  starts_on: string | null;
+  ends_on: string | null;
+  created_at: string;
+  customer: Ref;
+  quote_id: string | null;
+};
+export type TimeEntry = {
+  id: string;
+  work_date: string;
+  hours: number | null;
+  started_at: string | null;
+  billable: boolean;
+  note: string | null;
+  invoiced: boolean;
+};
+export type MaterialUsage = {
+  id: string;
+  item_id: string | null;
+  description: string;
+  quantity: number;
+  unit: string;
+  unit_price: number | null;
+  billable: boolean;
+  invoiced: boolean;
+};
+export type Job = JobSummary & {
+  site_address: Address | null;
+  customer: Ref & { phone: string | null; address: Address | null };
+  quote: { id: string; number: string | null; title: string | null } | null;
+  time_entries: TimeEntry[];
+  materials: MaterialUsage[];
+  invoices: { id: string; number: string | null; status: InvoiceStatus; total_incl: number | null }[];
+  total_hours: number;
+  uninvoiced_billable_hours: number;
+};
+
+export type RunningTimer = {
+  id: string;
+  started_at: string;
+  note: string | null;
+  job: { id: string; title: string; customer: Ref };
+};
+export type Overview = {
+  timer: RunningTimer | null;
+  open_jobs: number;
+  open_quotes: number;
+  unpaid_invoices: number;
+  unpaid_amount: number;
+  hours_this_week: number;
+};
+
+export type InvoiceStatus = 'concept' | 'definitief' | 'betaald' | 'vervallen';
+export type InvoiceSummary = {
+  id: string;
+  number: string | null;
+  kind: 'factuur' | 'credit';
+  status: InvoiceStatus;
+  issued_on: string | null;
+  due_on: string | null;
+  created_at: string;
+  customer: Ref;
+  total_incl: number;
+  open_amount: number;
+};
+export type Invoice = Omit<InvoiceSummary, 'total_incl'> &
+  Totals & {
+    job: { id: string; title: string } | null;
+    customer_snapshot: { name?: string; address?: Address; vat_number?: string; email?: string } | null;
+    lines: Line[];
+    payments: { id: string; amount: number; paid_on: string; method: string | null }[];
+    paid_amount: number;
+  };

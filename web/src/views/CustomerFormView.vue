@@ -1,17 +1,21 @@
 <script setup lang="ts">
-import { reactive, ref } from 'vue';
-import { useRouter } from 'vue-router';
-import { ArrowLeft, Check } from 'lucide-vue-next';
-import { api } from '../lib/api';
-import { loadCurrentTenant } from '../lib/session';
+import { onMounted, reactive, ref } from 'vue';
+import { useRoute, useRouter } from 'vue-router';
+import { Check } from 'lucide-vue-next';
+import type { Customer } from '../lib/api';
+import { tapi } from '../lib/tenant';
+import PageHeader from '../components/PageHeader.vue';
+import ErrorAlert from '../components/ErrorAlert.vue';
 
+// Nieuwe klant, of een bestaande bewerken (/klanten/:id/bewerken).
+const props = defineProps<{ id?: string }>();
 const router = useRouter();
+const route = useRoute();
 const saving = ref(false);
 const error = ref('');
-const saved = ref('');
 
 const form = reactive({
-  kind: 'particulier' as 'particulier' | 'zakelijk',
+  kind: 'particulier' as Customer['kind'],
   name: '',
   email: '',
   phone: '',
@@ -21,28 +25,51 @@ const form = reactive({
   vat_number: '',
 });
 
-const blank = (s: string) => (s.trim() ? s.trim() : undefined);
+onMounted(async () => {
+  if (!props.id) return;
+  try {
+    const c = await tapi<Customer>(`/customers/${props.id}`);
+    Object.assign(form, {
+      kind: c.kind,
+      name: c.name,
+      email: c.email ?? '',
+      phone: c.phone ?? '',
+      street: c.address?.street ?? '',
+      postal_code: c.address?.postal_code ?? '',
+      city: c.address?.city ?? '',
+      vat_number: c.vat_number ?? '',
+    });
+  } catch (e) {
+    error.value = (e as Error).message;
+  }
+});
+
+const blank = (s: string) => (s.trim() ? s.trim() : null);
 
 async function save() {
   saving.value = true;
   error.value = '';
   try {
-    const tenant = await loadCurrentTenant();
-    if (!tenant) throw new Error('Geen bedrijf gevonden');
-    const address = { street: blank(form.street), postal_code: blank(form.postal_code), city: blank(form.city) };
-    await api(`/tenants/${tenant.id}/customers`, {
-      method: 'POST',
-      json: {
-        kind: form.kind,
-        name: form.name.trim(),
-        email: blank(form.email),
-        phone: blank(form.phone),
-        vat_number: form.kind === 'zakelijk' ? blank(form.vat_number) : undefined,
-        address: Object.values(address).some(Boolean) ? address : undefined,
-      },
-    });
-    saved.value = form.name.trim();
-    setTimeout(() => router.replace('/'), 900);
+    const address = { street: blank(form.street) ?? undefined, postal_code: blank(form.postal_code) ?? undefined, city: blank(form.city) ?? undefined };
+    const hasAddress = Object.values(address).some(Boolean);
+    const body = {
+      kind: form.kind,
+      name: form.name.trim(),
+      email: blank(form.email),
+      phone: blank(form.phone),
+      vat_number: form.kind === 'zakelijk' ? blank(form.vat_number) : null,
+      address: hasAddress ? address : null,
+    };
+    const saved = props.id
+      ? await tapi<Customer>(`/customers/${props.id}`, { method: 'PATCH', json: body })
+      : await tapi<Customer>('/customers', {
+          method: 'POST',
+          // Bij aanmaken laten we lege velden weg.
+          json: Object.fromEntries(Object.entries(body).filter(([, v]) => v !== null)),
+        });
+    // Terug naar waar je vandaan kwam (bijv. een nieuwe offerte), anders naar de klant.
+    const back = route.query.terug as string | undefined;
+    await router.replace(back ? `${back}${back.includes('?') ? '&' : '?'}klant=${saved.id}` : `/klanten/${saved.id}`);
   } catch (e) {
     error.value = (e as Error).message;
   } finally {
@@ -53,10 +80,7 @@ async function save() {
 
 <template>
   <main class="mx-auto flex min-h-dvh max-w-xl flex-col px-4 pt-4 pb-10 sm:px-6 sm:pt-8">
-    <header class="mb-4 flex items-center gap-2">
-      <RouterLink to="/" class="btn btn-ghost btn-circle" aria-label="Terug"><ArrowLeft class="size-5" /></RouterLink>
-      <h1 class="text-2xl font-bold">Nieuwe klant</h1>
-    </header>
+    <PageHeader :title="id ? 'Klant bewerken' : 'Nieuwe klant'" :back="id ? `/klanten/${id}` : '/klanten'" />
 
     <form class="flex flex-col gap-4" @submit.prevent="save">
       <div class="join w-full">
@@ -97,10 +121,9 @@ async function save() {
         <input v-model="form.vat_number" class="input input-lg w-full uppercase" placeholder="Btw-nummer" />
       </label>
 
-      <div v-if="error" role="alert" class="alert alert-error alert-soft">{{ error }}</div>
-      <div v-if="saved" role="status" class="alert alert-success alert-soft">{{ saved }} is toegevoegd.</div>
+      <ErrorAlert :message="error" />
 
-      <button class="btn btn-primary btn-lg mt-2 w-full" :disabled="saving || !form.name.trim() || !!saved">
+      <button class="btn btn-primary btn-lg mt-2 w-full" :disabled="saving || !form.name.trim()">
         <span v-if="saving" class="loading loading-spinner" />
         <Check v-else class="size-5" /> Klant opslaan
       </button>
