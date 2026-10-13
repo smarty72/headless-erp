@@ -1,7 +1,7 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { dbError } from '../errors.js';
 import { TenantParams, Uuid, errors } from '../schemas.js';
-import { body, conflict, json, notFound, round2, type App, type Db } from './common.js';
+import { CustomerRef, body, conflict, json, notFound, round2, searchTerm, type App, type Db } from './common.js';
 
 const RunningTimer = z
   .object({
@@ -26,6 +26,14 @@ const Overview = z
     hours_this_week: z.number(),
   })
   .openapi('Overview');
+
+const SearchResults = z
+  .object({
+    customers: z.array(z.object({ id: Uuid, name: z.string(), city: z.string().nullable() })),
+    jobs: z.array(z.object({ id: Uuid, title: z.string(), status: z.string(), customer: CustomerRef })),
+    quotes: z.array(z.object({ id: Uuid, number: z.string().nullable(), title: z.string().nullable(), status: z.string(), customer: CustomerRef })),
+  })
+  .openapi('SearchResults');
 
 async function runningTimer(db: Db, tenantId: string, userId: string) {
   const { data, error } = await db
@@ -95,6 +103,64 @@ export function registerWork(app: App) {
       if (error) dbError(error);
       const { id, job_id, hours, started_at, ended_at } = data;
       return c.json({ id, job_id, hours, started_at, ended_at }, 200);
+    },
+  );
+
+  app.openapi(
+    createRoute({
+      method: 'get',
+      path: '/tenants/{tenantId}/search',
+      summary: 'Zoeken op klantnaam of project: klanten, opdrachten en offertes',
+      security: [{ bearer: [] }],
+      request: { params: TenantParams, query: z.object({ q: z.string() }) },
+      responses: { 200: json(SearchResults, 'Gevonden, maximaal 8 per soort'), ...errors },
+    }),
+    async (c) => {
+      const { tenantId } = c.req.valid('param');
+      const term = searchTerm(c.req.valid('query').q);
+      if (!term) return c.json({ customers: [], jobs: [], quotes: [] }, 200);
+      const db = c.var.db;
+      const customers = await db
+        .from('customers')
+        .select('id, name, address')
+        .eq('tenant_id', tenantId)
+        .is('archived_at', null)
+        .ilike('name', `%${term}%`)
+        .order('name')
+        .limit(8);
+      if (customers.error) dbError(customers.error);
+      // Opdrachten en offertes vind je op hun eigen naam of op die van de klant.
+      const ids = customers.data.map((r) => r.id as string);
+      const ofCustomer = ids.length ? `,customer_id.in.(${ids.join(',')})` : '';
+      const [jobs, quotes] = await Promise.all([
+        db
+          .from('jobs')
+          .select('id, title, status, customer:customers(id, name)')
+          .eq('tenant_id', tenantId)
+          .or(`title.ilike.*${term}*${ofCustomer}`)
+          .order('created_at', { ascending: false })
+          .limit(8),
+        db
+          .from('quotes')
+          .select('id, number, title, status, customer:customers(id, name)')
+          .eq('tenant_id', tenantId)
+          .or(`title.ilike.*${term}*,number.ilike.*${term}*${ofCustomer}`)
+          .order('created_at', { ascending: false })
+          .limit(8),
+      ]);
+      for (const r of [jobs, quotes]) if (r.error) dbError(r.error);
+      return c.json(
+        {
+          customers: customers.data.map((r) => ({
+            id: r.id as string,
+            name: r.name as string,
+            city: (r.address as { city?: string } | null)?.city ?? null,
+          })),
+          jobs: jobs.data as unknown as z.infer<typeof SearchResults>['jobs'],
+          quotes: quotes.data as unknown as z.infer<typeof SearchResults>['quotes'],
+        },
+        200,
+      );
     },
   );
 

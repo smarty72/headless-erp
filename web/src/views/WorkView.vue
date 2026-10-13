@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue';
-import { CircleCheck, ClipboardPlus, Play, Square } from 'lucide-vue-next';
+import { ChevronRight, CircleCheck, ClipboardPlus, Square } from 'lucide-vue-next';
 import type { JobSummary, RunningTimer } from '../lib/api';
 import { tapi } from '../lib/tenant';
 import { hours, shortDate } from '../lib/format';
@@ -10,7 +10,7 @@ import StatusBadge from '../components/StatusBadge.vue';
 import ErrorAlert from '../components/ErrorAlert.vue';
 import EmptyState from '../components/EmptyState.vue';
 
-// Aan het werk: timer op een klus starten of stoppen, in zo min mogelijk tikken.
+// Aan het werk: de lopende timer stoppen, of een klus openen om daar te starten.
 const timer = ref<RunningTimer | null>(null);
 const jobs = ref<JobSummary[]>([]);
 const loading = ref(true);
@@ -37,20 +37,6 @@ onMounted(async () => {
     loading.value = false;
   }
 });
-
-async function start(job: JobSummary) {
-  busy.value = job.id;
-  error.value = '';
-  booked.value = null;
-  try {
-    timer.value = await tapi<RunningTimer>('/timer/start', { method: 'POST', json: { job_id: job.id } });
-    await load();
-  } catch (e) {
-    error.value = (e as Error).message;
-  } finally {
-    busy.value = '';
-  }
-}
 
 async function stop() {
   busy.value = 'stop';
@@ -80,6 +66,7 @@ async function stop() {
         <p class="text-sm opacity-80">Bezig op</p>
         <RouterLink :to="`/opdrachten/${timer.job.id}`" class="text-xl font-bold underline-offset-4 hover:underline">{{ timer.job.title }}</RouterLink>
         <p class="opacity-90">{{ timer.job.customer.name }}</p>
+        <p v-if="timer.note" class="badge badge-lg border-0 bg-white/20 text-inherit">{{ timer.note }}</p>
         <p class="my-3 text-5xl font-semibold tabular-nums">{{ elapsed }}</p>
         <button class="btn btn-lg w-full max-w-xs border-0 bg-white/95 text-black hover:bg-white" :disabled="busy === 'stop'" @click="stop">
           <span v-if="busy === 'stop'" class="loading loading-spinner" /><Square v-else class="size-5 fill-current" /> Stoppen
@@ -93,22 +80,19 @@ async function stop() {
 
       <h2 v-if="jobs.some((x) => x.id !== timer?.job.id)" class="text-base-content/70 mb-2 text-sm font-semibold">{{ timer ? 'Overstappen naar een andere klus' : 'Op welke klus ga je aan de slag?' }}</h2>
       <div class="flex flex-col gap-3">
-        <button
+        <RouterLink
           v-for="j in jobs.filter((x) => x.id !== timer?.job.id)"
           :key="j.id"
+          :to="`/opdrachten/${j.id}`"
           class="bg-base-100 rounded-box flex items-center gap-3 p-4 text-left shadow-sm active:scale-[0.99]"
-          :disabled="!!busy"
-          @click="start(j)"
         >
-          <span class="bg-primary/10 text-primary grid size-12 shrink-0 place-items-center rounded-full">
-            <span v-if="busy === j.id" class="loading loading-spinner" /><Play v-else class="size-5 fill-current" />
-          </span>
           <span class="min-w-0 flex-1">
             <span class="block truncate font-semibold">{{ j.title }}</span>
             <span class="text-base-content/60 block truncate text-sm">{{ j.customer.name }}<template v-if="j.starts_on"> · {{ shortDate(j.starts_on) }}</template></span>
           </span>
           <StatusBadge type="job" :status="j.status" />
-        </button>
+          <ChevronRight class="size-4 shrink-0 opacity-40" />
+        </RouterLink>
       </div>
 
       <EmptyState v-if="!jobs.length" :icon="ClipboardPlus" title="Nog geen klussen" text="Maak een opdracht aan, of accepteer een offerte. Dan kun je hier je uren starten.">
