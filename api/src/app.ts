@@ -57,6 +57,67 @@ const Invoice = z
   })
   .openapi('Invoice');
 
+const VatRate = z.union([z.literal(0), z.literal(9), z.literal(21)]);
+
+const Item = z
+  .object({
+    id: Uuid,
+    kind: z.enum(['materiaal', 'arbeid', 'overig']),
+    name: z.string(),
+    brand: z.string().nullable(),
+    sku: z.string().nullable(),
+    unit: z.string(),
+    purchase_price: z.number().nullable(),
+    sale_price: z.number(),
+    vat_rate: z.number(),
+    track_stock: z.boolean(),
+    stock_quantity: z.number(),
+    min_stock: z.number().nullable(),
+    attributes: z.record(z.string(), z.unknown()),
+  })
+  .openapi('Item');
+const ITEM_COLUMNS =
+  'id, kind, name, brand, sku, unit, purchase_price, sale_price, vat_rate, track_stock, stock_quantity, min_stock, attributes';
+
+// Prijzen zijn exclusief btw.
+const NewItem = z
+  .object({
+    kind: z.enum(['materiaal', 'arbeid', 'overig']),
+    name: z.string().min(1),
+    brand: z.string().optional(),
+    sku: z.string().optional(),
+    unit: z.string().min(1).openapi({ example: 'stuk' }),
+    purchase_price: z.number().nonnegative().optional(),
+    sale_price: z.number().nonnegative(),
+    vat_rate: VatRate.default(21),
+    track_stock: z.boolean().default(false),
+    min_stock: z.number().nonnegative().optional(),
+    attributes: z.record(z.string(), z.unknown()).optional(),
+  })
+  .openapi('NewItem');
+
+const StockMovement = z
+  .object({
+    id: z.number(),
+    item_id: Uuid,
+    quantity: z.number(),
+    reason: z.enum(['beginvoorraad', 'inkoop', 'verbruik', 'correctie', 'retour']),
+    job_id: Uuid.nullable(),
+    unit_cost: z.number().nullable(),
+    note: z.string().nullable(),
+    created_at: z.string(),
+  })
+  .openapi('StockMovement');
+const NewStockMovement = z
+  .object({
+    quantity: z.number().refine((q) => q !== 0, 'Aantal mag niet 0 zijn'),
+    reason: z.enum(['beginvoorraad', 'inkoop', 'correctie', 'retour']),
+    unit_cost: z.number().nonnegative().optional(),
+    note: z.string().optional(),
+  })
+  .openapi('NewStockMovement');
+const ItemParams = TenantParams.extend({ itemId: Uuid.openapi({ param: { name: 'itemId', in: 'path' } }) });
+
 const errors = {
   401: { description: 'Niet ingelogd', content: { 'application/json': { schema: ErrorBody } } },
   403: { description: 'Geen rechten', content: { 'application/json': { schema: ErrorBody } } },
@@ -189,6 +250,149 @@ export function createApp() {
         .single();
       if (error) dbError(error);
       return c.json(data as z.infer<typeof Customer>, 201);
+    },
+  );
+
+  // Artikelen: arbeid, materialen en overige posten.
+  app.openapi(
+    createRoute({
+      method: 'get',
+      path: '/tenants/{tenantId}/items',
+      security: [{ bearer: [] }],
+      request: {
+        params: TenantParams,
+        query: z.object({
+          kind: z.enum(['materiaal', 'arbeid', 'overig']).optional(),
+          low_stock: z.enum(['true', 'false']).optional().openapi({ description: 'Alleen artikelen onder de minimumvoorraad' }),
+          search: z.string().optional(),
+        }),
+      },
+      responses: {
+        200: { description: 'Artikelen', content: { 'application/json': { schema: z.array(Item) } } },
+        ...errors,
+      },
+    }),
+    async (c) => {
+      const { tenantId } = c.req.valid('param');
+      const { kind, low_stock, search } = c.req.valid('query');
+      let query = c.var.db.from('items').select(ITEM_COLUMNS).eq('tenant_id', tenantId).is('archived_at', null);
+      if (kind) query = query.eq('kind', kind);
+      if (search) {
+        // Alleen letters, cijfers en spaties: de term gaat in een PostgREST-filterstring.
+        const term = search.replace(/[^\p{L}\p{N} .-]/gu, '');
+        if (term) query = query.or(`name.ilike.*${term}*,brand.ilike.*${term}*`);
+      }
+      if (low_stock === 'true') {
+        const low = await c.var.db.from('low_stock_items').select('id').eq('tenant_id', tenantId);
+        if (low.error) dbError(low.error);
+        query = query.in('id', low.data.map((r) => r.id as string));
+      }
+      const { data, error } = await query.order('kind').order('name');
+      if (error) dbError(error);
+      return c.json(data as z.infer<typeof Item>[], 200);
+    },
+  );
+
+  app.openapi(
+    createRoute({
+      method: 'post',
+      path: '/tenants/{tenantId}/items',
+      security: [{ bearer: [] }],
+      request: { params: TenantParams, body: { content: { 'application/json': { schema: NewItem } } } },
+      responses: {
+        201: { description: 'Aangemaakt', content: { 'application/json': { schema: Item } } },
+        ...errors,
+        409: { description: 'Artikelcode bestaat al', content: { 'application/json': { schema: ErrorBody } } },
+      },
+    }),
+    async (c) => {
+      const { tenantId } = c.req.valid('param');
+      const { data, error } = await c.var.db
+        .from('items')
+        .insert({ ...c.req.valid('json'), tenant_id: tenantId })
+        .select(ITEM_COLUMNS)
+        .single();
+      if (error) dbError(error);
+      return c.json(data as z.infer<typeof Item>, 201);
+    },
+  );
+
+  app.openapi(
+    createRoute({
+      method: 'patch',
+      path: '/tenants/{tenantId}/items/{itemId}',
+      security: [{ bearer: [] }],
+      request: {
+        params: ItemParams,
+        body: { content: { 'application/json': { schema: NewItem.partial().extend({ vat_rate: VatRate.optional(), track_stock: z.boolean().optional() }) } } },
+      },
+      responses: {
+        200: { description: 'Bijgewerkt', content: { 'application/json': { schema: Item } } },
+        ...errors,
+        404: { description: 'Niet gevonden', content: { 'application/json': { schema: ErrorBody } } },
+      },
+    }),
+    async (c) => {
+      const { tenantId, itemId } = c.req.valid('param');
+      const { data, error } = await c.var.db
+        .from('items')
+        .update(c.req.valid('json'))
+        .eq('tenant_id', tenantId)
+        .eq('id', itemId)
+        .select(ITEM_COLUMNS)
+        .single();
+      if (error) dbError(error);
+      return c.json(data as z.infer<typeof Item>, 200);
+    },
+  );
+
+  // Voorraad: mutaties zijn onveranderlijk; verbruik op opdrachten wordt automatisch geboekt.
+  app.openapi(
+    createRoute({
+      method: 'get',
+      path: '/tenants/{tenantId}/items/{itemId}/stock-movements',
+      security: [{ bearer: [] }],
+      request: { params: ItemParams },
+      responses: {
+        200: { description: 'Mutaties, nieuwste eerst', content: { 'application/json': { schema: z.array(StockMovement) } } },
+        ...errors,
+      },
+    }),
+    async (c) => {
+      const { tenantId, itemId } = c.req.valid('param');
+      const { data, error } = await c.var.db
+        .from('stock_movements')
+        .select('id, item_id, quantity, reason, job_id, unit_cost, note, created_at')
+        .eq('tenant_id', tenantId)
+        .eq('item_id', itemId)
+        .order('created_at', { ascending: false })
+        .order('id', { ascending: false });
+      if (error) dbError(error);
+      return c.json(data as z.infer<typeof StockMovement>[], 200);
+    },
+  );
+
+  app.openapi(
+    createRoute({
+      method: 'post',
+      path: '/tenants/{tenantId}/items/{itemId}/stock-movements',
+      security: [{ bearer: [] }],
+      request: { params: ItemParams, body: { content: { 'application/json': { schema: NewStockMovement } } } },
+      responses: {
+        201: { description: 'Geboekt', content: { 'application/json': { schema: StockMovement } } },
+        ...errors,
+        409: { description: 'Geen voorraad voor dit artikel', content: { 'application/json': { schema: ErrorBody } } },
+      },
+    }),
+    async (c) => {
+      const { tenantId, itemId } = c.req.valid('param');
+      const { data, error } = await c.var.db
+        .from('stock_movements')
+        .insert({ ...c.req.valid('json'), tenant_id: tenantId, item_id: itemId })
+        .select('id, item_id, quantity, reason, job_id, unit_cost, note, created_at')
+        .single();
+      if (error) dbError(error);
+      return c.json(data as z.infer<typeof StockMovement>, 201);
     },
   );
 
