@@ -227,9 +227,9 @@ describe('HeadlessERP API', () => {
     const { job_id } = (await accepted.json()) as { job_id: string };
 
     // Aan het werk: timer starten en stoppen.
-    const started = await call(dirk, 'POST', `${base}/timer/start`, { job_id });
+    const started = await call(dirk, 'POST', `${base}/timer/start`, { job_id, note: 'Voorkant huis' });
     expect(started.status).toBe(201);
-    expect(await started.json()).toMatchObject({ job: { id: job_id, title: 'Kozijnen buiten', customer: { name: 'Fam. Bakker' } } });
+    expect(await started.json()).toMatchObject({ note: 'Voorkant huis', job: { id: job_id, title: 'Kozijnen buiten', customer: { name: 'Fam. Bakker' } } });
     const stopped = (await (await call(dirk, 'POST', `${base}/timer/stop`)).json()) as { hours: number };
     expect(stopped.hours).toBe(0.25);
     expect(await (await call(dirk, 'GET', `${base}/timer`)).json()).toEqual({ timer: null });
@@ -250,7 +250,27 @@ describe('HeadlessERP API', () => {
     const draft = (await (await call(dirk, 'GET', `${base}/invoices/${invoice_id}`)).json()) as {
       lines: { id: string; description: string; quantity: number; unit: string; unit_price: number; vat_rate: number }[];
     };
-    expect(draft.lines.map((l) => l.description)).toEqual(['Schilderwerk kozijnen', 'Sikkens Rubbol', 'Uurtarief schilder', 'Sikkens Rubbol BL Azura']);
+    expect(draft.lines.map((l) => l.description)).toEqual(['Schilderwerk kozijnen', 'Sikkens Rubbol', 'Uurtarief schilder – Meerwerk', 'Sikkens Rubbol BL Azura']);
+
+    // Zoeken op klantnaam vindt de klant én de opdracht en offerte; zoeken op project ook.
+    const byCustomer = (await (await call(dirk, 'GET', `${base}/search?q=bakk`)).json()) as {
+      customers: { name: string; city: string | null }[]; jobs: { id: string }[]; quotes: { id: string }[];
+    };
+    expect(byCustomer.customers).toEqual([expect.objectContaining({ name: 'Fam. Bakker', city: 'Zeist' })]);
+    expect(byCustomer.jobs.map((j) => j.id)).toEqual([job_id]);
+    expect(byCustomer.quotes.map((q) => q.id)).toEqual([quote.id]);
+    const byProject = (await (await call(dirk, 'GET', `${base}/search?q=kozijn`)).json()) as { customers: unknown[]; jobs: unknown[] };
+    expect([byProject.customers.length, byProject.jobs.length]).toEqual([0, 1]);
+    expect(await (await call(bram, 'GET', `${base}/search?q=bakk`)).json()).toEqual({ customers: [], jobs: [], quotes: [] });
+
+    // Opdracht kopiëren als offerte: dezelfde klant en de offerteregels, als concept.
+    const copied = await call(dirk, 'POST', `${base}/jobs/${job_id}/copy-to-quote`, {});
+    expect(copied.status).toBe(201);
+    const copy = (await (await call(dirk, 'GET', `${base}/quotes/${((await copied.json()) as { quote_id: string }).quote_id}`)).json()) as {
+      status: string; number: string | null; title: string; customer: { id: string }; lines: { description: string }[];
+    };
+    expect(copy).toMatchObject({ status: 'concept', number: null, title: 'Kozijnen buiten', customer: { id: customer.id } });
+    expect(copy.lines.map((l) => l.description)).toEqual(['Schilderwerk kozijnen', 'Sikkens Rubbol']);
 
     // Laatste regel weghalen en een eigen regel toevoegen.
     const edited = await call(dirk, 'PATCH', `${base}/invoices/${invoice_id}`, {
@@ -273,11 +293,44 @@ describe('HeadlessERP API', () => {
     expect(paid).toMatchObject({ status: 'betaald', open_amount: 0 });
 
     const detail = (await (await call(dirk, 'GET', `${base}/customers/${customer.id}`)).json()) as { quotes: unknown[]; jobs: unknown[]; invoices: unknown[] };
-    expect([detail.quotes.length, detail.jobs.length, detail.invoices.length]).toEqual([1, 1, 1]);
+    expect([detail.quotes.length, detail.jobs.length, detail.invoices.length]).toEqual([2, 1, 1]); // 2 offertes: origineel en kopie
 
     // Een ander bedrijf ziet hier niets van.
     expect(await (await call(bram, 'GET', `${base}/quotes`)).json()).toEqual([]);
     expect((await call(bram, 'GET', `${base}/jobs/${job_id}`)).status).toBe(404);
+  });
+
+  it('kopieert een regie-opdracht als offerte met uren per omschrijving en materiaal', async () => {
+    const eva = await tokenFor('eva');
+    const onboard = await call(eva, 'POST', '/onboarding', { industry: 'schilder', name: 'Schilder Eva', hourly_rate: 50, payment_days: 14 });
+    const base = `/tenants/${((await onboard.json()) as { id: string }).id}`;
+    const customer = (await (await call(eva, 'POST', `${base}/customers`, { name: 'Dhr. Jansen' })).json()) as { id: string };
+    const other = (await (await call(eva, 'POST', `${base}/customers`, { name: 'Mevr. Smit' })).json()) as { id: string };
+    const job = (await (await call(eva, 'POST', `${base}/jobs`, { customer_id: customer.id, title: 'Schuur verven' })).json()) as { id: string };
+    for (const [hours, note] of [[2, 'Schuren'], [1, ' Schuren '], [1, undefined]] as const)
+      await call(eva, 'POST', `${base}/jobs/${job.id}/time-entries`, { hours, note });
+    await call(eva, 'POST', `${base}/jobs/${job.id}/materials`, { description: 'Kwast', quantity: 2, unit: 'stuk', unit_price: 7.5 });
+
+    const res = await call(eva, 'POST', `${base}/jobs/${job.id}/copy-to-quote`, { customer_id: other.id });
+    expect(res.status).toBe(201);
+    const quote = (await (await call(eva, 'GET', `${base}/quotes/${((await res.json()) as { quote_id: string }).quote_id}`)).json()) as {
+      customer: { id: string }; lines: { description: string; quantity: number; unit_price: number; vat_rate: number }[];
+    };
+    expect(quote.customer.id).toBe(other.id);
+    expect(quote.lines.slice(0, 2).sort((a, b) => a.description.localeCompare(b.description))).toEqual([
+      expect.objectContaining({ description: 'Uurtarief schilder', quantity: 1, unit_price: 50, vat_rate: 9 }),
+      expect.objectContaining({ description: 'Uurtarief schilder – Schuren', quantity: 3, unit_price: 50, vat_rate: 9 }),
+    ]);
+    expect(quote.lines[2]).toMatchObject({ description: 'Kwast', quantity: 2, unit_price: 7.5, vat_rate: 21 });
+
+    // Op de factuur komen dezelfde omschrijvingen terug.
+    const inv = (await (await call(eva, 'POST', `${base}/jobs/${job.id}/invoice`)).json()) as { invoice_id: string };
+    const invoice = (await (await call(eva, 'GET', `${base}/invoices/${inv.invoice_id}`)).json()) as { lines: { description: string; quantity: number }[] };
+    expect(invoice.lines.map((l) => [l.description, l.quantity])).toEqual([
+      ['Uurtarief schilder', 1],
+      ['Uurtarief schilder – Schuren', 3],
+      ['Kwast', 2],
+    ]);
   });
 
   it('maakt een factuur definitief met doorlopend nummer', async () => {

@@ -205,3 +205,9 @@ export type Invoice = Omit<InvoiceSummary, 'total_incl'> &
     payments: { id: string; amount: number; paid_on: string; method: string | null }[];
     paid_amount: number;
   };
+
+export type SearchResults = {
+  customers: { id: string; name: string; city: string | null }[];
+  jobs: { id: string; title: string; status: JobStatus; customer: Ref }[];
+  quotes: { id: string; number: string | null; title: string | null; status: QuoteStatus; customer: Ref }[];
+};

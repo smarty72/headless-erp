@@ -391,4 +391,118 @@ export function registerJobs(app: App) {
       return c.json({ invoice_id: data.id }, 201);
     },
   );
+
+  app.openapi(
+    createRoute({
+      method: 'post',
+      path: '/tenants/{tenantId}/jobs/{jobId}/copy-to-quote',
+      summary: 'Opdracht kopiëren als nieuwe conceptofferte',
+      description:
+        'Met offerte: de offerteregels. Zonder offerte (regie): de geboekte uren per tarief en omschrijving, plus het materiaal.',
+      security: [{ bearer: [] }],
+      request: {
+        params: Params,
+        body: body(z.object({ customer_id: Uuid.optional().openapi({ description: 'Standaard dezelfde klant' }) })),
+      },
+      responses: { 201: json(z.object({ quote_id: Uuid }), 'Conceptofferte'), ...errors, ...notFound, ...invalid },
+    }),
+    async (c) => {
+      const { tenantId, jobId } = c.req.valid('param');
+      const { customer_id } = c.req.valid('json');
+      const db = c.var.db;
+      const job = await db
+        .from('jobs')
+        .select(`title, customer_id, quote_id,
+          time_entries(item_id, hours, note, work_date),
+          material_usages(item_id, description, quantity, unit, unit_price, created_at, item:items(sale_price, vat_rate))`)
+        .eq('tenant_id', tenantId)
+        .eq('id', jobId)
+        .single();
+      if (job.error) dbError(job.error);
+      const src = job.data as unknown as CopySource;
+      const lines = src.quote_id ? await quoteLines(db, tenantId, src.quote_id) : await workLines(db, tenantId, src);
+
+      const quote = await db
+        .from('quotes')
+        .insert({ tenant_id: tenantId, customer_id: customer_id ?? src.customer_id, title: src.title })
+        .select('id')
+        .single();
+      if (quote.error) dbError(quote.error);
+      if (lines.length) {
+        const ins = await db
+          .from('quote_lines')
+          .insert(lines.map((l, i) => ({ ...l, tenant_id: tenantId, quote_id: quote.data.id, position: i + 1 })));
+        if (ins.error) dbError(ins.error);
+      }
+      return c.json({ quote_id: quote.data.id as string }, 201);
+    },
+  );
+}
+
+type CopySource = {
+  title: string;
+  customer_id: string;
+  quote_id: string | null;
+  time_entries: { item_id: string | null; hours: number | null; note: string | null; work_date: string }[];
+  material_usages: {
+    item_id: string | null; description: string; quantity: number; unit: string; unit_price: number | null; created_at: string;
+    item: { sale_price: number; vat_rate: number } | null;
+  }[];
+};
+type CopyLine = { item_id: string | null; description: string; quantity: number; unit: string; unit_price: number; vat_rate: number };
+
+async function quoteLines(db: Db, tenantId: string, quoteId: string): Promise<CopyLine[]> {
+  const { data, error } = await db
+    .from('quote_lines')
+    .select('item_id, description, quantity, unit, unit_price, vat_rate')
+    .eq('tenant_id', tenantId)
+    .eq('quote_id', quoteId)
+    .order('position');
+  if (error) dbError(error);
+  return data as CopyLine[];
+}
+
+// Regie: uren per tarief en omschrijving (zoals op de factuur), daarna het materiaal.
+async function workLines(db: Db, tenantId: string, job: CopySource): Promise<CopyLine[]> {
+  const rates = await db
+    .from('items')
+    .select('id, name, sale_price, vat_rate, created_at')
+    .eq('tenant_id', tenantId)
+    .eq('kind', 'arbeid')
+    .order('created_at')
+    .order('name');
+  if (rates.error) dbError(rates.error);
+  const byId = new Map(rates.data.map((r) => [r.id as string, r]));
+  const fallback = rates.data[0];
+
+  const hours = new Map<string, CopyLine>();
+  const entries = job.time_entries.filter((e) => e.hours !== null).sort((a, b) => a.work_date.localeCompare(b.work_date));
+  for (const e of entries) {
+    const rate = (e.item_id && byId.get(e.item_id)) || fallback;
+    const note = e.note?.trim() || null;
+    const key = `${rate?.id ?? ''}|${note ?? ''}`;
+    const line = hours.get(key);
+    if (line) line.quantity = round2(line.quantity + e.hours!);
+    else
+      hours.set(key, {
+        item_id: (rate?.id as string | undefined) ?? null,
+        description: [rate?.name ?? 'Arbeid', note].filter(Boolean).join(' – '),
+        quantity: e.hours!,
+        unit: 'uur',
+        unit_price: (rate?.sale_price as number | undefined) ?? 0,
+        vat_rate: (rate?.vat_rate as number | undefined) ?? 21,
+      });
+  }
+
+  const materials = [...job.material_usages]
+    .sort((a, b) => a.created_at.localeCompare(b.created_at))
+    .map((m) => ({
+      item_id: m.item_id,
+      description: m.description,
+      quantity: m.quantity,
+      unit: m.unit,
+      unit_price: m.unit_price ?? m.item?.sale_price ?? 0,
+      vat_rate: m.item?.vat_rate ?? 21,
+    }));
+  return [...hours.values(), ...materials];
 }

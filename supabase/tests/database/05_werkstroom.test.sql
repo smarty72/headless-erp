@@ -76,9 +76,9 @@ select results_eq(
   $$select description, quantity, unit_price, vat_rate from public.invoice_lines order by position$$,
   $$values ('Schilderwerk kozijnen', 16.000::numeric(12,3), 60.00::numeric(12,2), 9.00::numeric(4,2)),
            ('Verf', 3.000, 18.95, 21.00),
-           ('Uurtarief schilder', 1.500, 60.00, 9.00),
+           ('Uurtarief schilder – Meerwerk dakkapel', 1.500, 60.00, 9.00),
            ('Sikkens Rubbol', 2.000, 18.95, 21.00)$$,
-  'Factuur = offerteregels + factureerbare uren + materiaal');
+  'Factuur = offerteregels + factureerbare uren (met omschrijving) + materiaal');
 select is((select count(*)::int from public.time_entries where billable and invoice_line_id is null), 0,
   'Gefactureerde uren zijn gekoppeld');
 select is((public.create_invoice_from_job((select v from ids where k = 't'), (select v from ids where k = 'j'))).id,
