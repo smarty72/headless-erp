@@ -87,3 +87,21 @@ input[type='number']::-webkit-outer-spin-button {
 input[type='number'] {
   -moz-appearance: textfield;
 }
+
+/* Afdrukken / PDF: alleen het document */
+@media print {
+  .no-print {
+    display: none !important;
+  }
+  body {
+    background: white;
+  }
+  main {
+    max-width: none !important;
+    padding: 0 !important;
+  }
+  .print-sheet {
+    box-shadow: none !important;
+    padding: 0 !important;
+  }
+}

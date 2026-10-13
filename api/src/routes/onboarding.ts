@@ -154,6 +154,61 @@ export function registerOnboarding(app: App) {
     },
   );
 
+  // Bedrijfsgegevens bijwerken (owner/admin). payment_days komt in settings.
+  app.openapi(
+    createRoute({
+      method: 'patch',
+      path: '/tenants/{tenantId}',
+      security: [{ bearer: [] }],
+      request: {
+        params: TenantParams,
+        body: {
+          content: {
+            'application/json': {
+              schema: z
+                .object({
+                  name: z.string().trim().min(1, 'Bedrijfsnaam is verplicht').optional(),
+                  contact_name: z.string().nullable().optional(),
+                  email: z.email('Ongeldig e-mailadres').nullable().optional(),
+                  phone: z.string().nullable().optional(),
+                  address: Address.nullable().optional(),
+                  kvk_number: z.string().nullable().optional(),
+                  vat_number: z.string().nullable().optional(),
+                  iban: z.string().nullable().optional(),
+                  payment_days: z.number().int().min(0).max(120).optional(),
+                })
+                .openapi('TenantUpdate'),
+            },
+          },
+        },
+      },
+      responses: {
+        200: { description: 'Bijgewerkt', content: { 'application/json': { schema: TenantDetails } } },
+        ...errors,
+        404: { description: 'Niet gevonden', content: { 'application/json': { schema: ErrorBody } } },
+      },
+    }),
+    async (c) => {
+      const { tenantId } = c.req.valid('param');
+      const { payment_days, ...fields } = c.req.valid('json');
+      let update: Record<string, unknown> = fields;
+      if (payment_days !== undefined) {
+        const cur = await c.var.db.from('tenants').select('settings').eq('id', tenantId).single();
+        if (cur.error) dbError(cur.error);
+        update = { ...fields, settings: { ...(cur.data.settings as object), payment_days } };
+      }
+      // RLS laat een niet-beheerder niets bijwerken; dat wordt dan "niet gevonden".
+      const { data, error } = await c.var.db
+        .from('tenants')
+        .update(update)
+        .eq('id', tenantId)
+        .select(TENANT_COLUMNS)
+        .single<TenantRow>();
+      if (error) dbError(error);
+      return c.json(withLogoUrl(c.var.db, data), 200);
+    },
+  );
+
   // Logo als multipart-upload (veld "file"); alleen owner/admin, max 2 MB.
   app.openapi(
     createRoute({

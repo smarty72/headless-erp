@@ -4,34 +4,17 @@ import { requireUser, type AuthVariables } from './auth.js';
 import { cors } from 'hono/cors';
 import { env } from './env.js';
 import { dbError } from './errors.js';
+import { registerCustomers } from './routes/customers.js';
+import { registerInvoices } from './routes/invoices.js';
+import { registerJobs } from './routes/jobs.js';
 import { registerOnboarding } from './routes/onboarding.js';
+import { registerQuotes } from './routes/quotes.js';
+import { registerWork } from './routes/work.js';
 import { ErrorBody, TenantParams, Uuid, errors } from './schemas.js';
 
 const Tenant = z
   .object({ id: Uuid, name: z.string(), industry: z.string(), role: z.string() })
   .openapi('Tenant');
-
-const Customer = z
-  .object({
-    id: Uuid,
-    tenant_id: Uuid,
-    kind: z.enum(['particulier', 'zakelijk']),
-    name: z.string(),
-    email: z.string().nullable(),
-    phone: z.string().nullable(),
-    vat_number: z.string().nullable(),
-    address: z.record(z.string(), z.unknown()).nullable(),
-    attributes: z.record(z.string(), z.unknown()),
-  })
-  .openapi('Customer');
-
-const NewCustomer = Customer.pick({ kind: true, name: true }).partial({ kind: true }).extend({
-  email: z.email().optional(),
-  phone: z.string().optional(),
-  vat_number: z.string().optional(),
-  address: z.record(z.string(), z.unknown()).optional(),
-  attributes: z.record(z.string(), z.unknown()).optional(),
-});
 
 const FieldDefinition = z
   .object({
@@ -43,19 +26,6 @@ const FieldDefinition = z
     required: z.boolean(),
   })
   .openapi('FieldDefinition');
-
-const Invoice = z
-  .object({
-    id: Uuid,
-    number: z.string().nullable(),
-    status: z.string(),
-    issued_on: z.string().nullable(),
-    due_on: z.string().nullable(),
-    total_excl: z.number().nullable(),
-    total_vat: z.number().nullable(),
-    total_incl: z.number().nullable(),
-  })
-  .openapi('Invoice');
 
 const VatRate = z.union([z.literal(0), z.literal(9), z.literal(21)]);
 
@@ -148,6 +118,11 @@ export function createApp() {
   app.use('/onboarding', requireUser);
 
   registerOnboarding(app);
+  registerCustomers(app);
+  registerQuotes(app);
+  registerJobs(app);
+  registerWork(app);
+  registerInvoices(app);
 
   // Bedrijven waar de gebruiker lid van is.
   app.openapi(
@@ -201,56 +176,6 @@ export function createApp() {
         .single<{ id: string; name: string; industry: string }>();
       if (error) dbError(error);
       return c.json({ id: data.id, name: data.name, industry: data.industry, role: 'owner' }, 201);
-    },
-  );
-
-  app.openapi(
-    createRoute({
-      method: 'get',
-      path: '/tenants/{tenantId}/customers',
-      security: [{ bearer: [] }],
-      request: { params: TenantParams },
-      responses: {
-        200: { description: 'Klanten', content: { 'application/json': { schema: z.array(Customer) } } },
-        ...errors,
-      },
-    }),
-    async (c) => {
-      const { tenantId } = c.req.valid('param');
-      const { data, error } = await c.var.db
-        .from('customers')
-        .select('id, tenant_id, kind, name, email, phone, vat_number, address, attributes')
-        .eq('tenant_id', tenantId)
-        .is('archived_at', null)
-        .order('name');
-      if (error) dbError(error);
-      return c.json(data as z.infer<typeof Customer>[], 200);
-    },
-  );
-
-  app.openapi(
-    createRoute({
-      method: 'post',
-      path: '/tenants/{tenantId}/customers',
-      security: [{ bearer: [] }],
-      request: {
-        params: TenantParams,
-        body: { content: { 'application/json': { schema: NewCustomer } } },
-      },
-      responses: {
-        201: { description: 'Aangemaakt', content: { 'application/json': { schema: Customer } } },
-        ...errors,
-      },
-    }),
-    async (c) => {
-      const { tenantId } = c.req.valid('param');
-      const { data, error } = await c.var.db
-        .from('customers')
-        .insert({ ...c.req.valid('json'), tenant_id: tenantId })
-        .select('id, tenant_id, kind, name, email, phone, vat_number, address, attributes')
-        .single();
-      if (error) dbError(error);
-      return c.json(data as z.infer<typeof Customer>, 201);
     },
   );
 
@@ -347,6 +272,53 @@ export function createApp() {
     },
   );
 
+  app.openapi(
+    createRoute({
+      method: 'get',
+      path: '/tenants/{tenantId}/items/{itemId}',
+      security: [{ bearer: [] }],
+      request: { params: ItemParams },
+      responses: {
+        200: { description: 'Artikel', content: { 'application/json': { schema: Item } } },
+        ...errors,
+        404: { description: 'Niet gevonden', content: { 'application/json': { schema: ErrorBody } } },
+      },
+    }),
+    async (c) => {
+      const { tenantId, itemId } = c.req.valid('param');
+      const { data, error } = await c.var.db.from('items').select(ITEM_COLUMNS).eq('tenant_id', tenantId).eq('id', itemId).single();
+      if (error) dbError(error);
+      return c.json(data as z.infer<typeof Item>, 200);
+    },
+  );
+
+  // Archiveren: offertes, uren en facturen blijven naar het artikel verwijzen.
+  app.openapi(
+    createRoute({
+      method: 'delete',
+      path: '/tenants/{tenantId}/items/{itemId}',
+      security: [{ bearer: [] }],
+      request: { params: ItemParams },
+      responses: {
+        204: { description: 'Gearchiveerd' },
+        ...errors,
+        404: { description: 'Niet gevonden', content: { 'application/json': { schema: ErrorBody } } },
+      },
+    }),
+    async (c) => {
+      const { tenantId, itemId } = c.req.valid('param');
+      const { error } = await c.var.db
+        .from('items')
+        .update({ archived_at: new Date().toISOString() })
+        .eq('tenant_id', tenantId)
+        .eq('id', itemId)
+        .select('id')
+        .single();
+      if (error) dbError(error);
+      return c.body(null, 204);
+    },
+  );
+
   // Voorraad: mutaties zijn onveranderlijk; verbruik op opdrachten wordt automatisch geboekt.
   app.openapi(
     createRoute({
@@ -434,31 +406,6 @@ export function createApp() {
         .filter((f) => f.tenant_id !== null || f.industry === tenant.data.industry)
         .map(({ tenant_id: _t, industry: _i, ...field }) => field);
       return c.json(fields as z.infer<typeof FieldDefinition>[], 200);
-    },
-  );
-
-  app.openapi(
-    createRoute({
-      method: 'post',
-      path: '/tenants/{tenantId}/invoices/{invoiceId}/finalize',
-      security: [{ bearer: [] }],
-      request: {
-        params: TenantParams.extend({ invoiceId: Uuid.openapi({ param: { name: 'invoiceId', in: 'path' } }) }),
-      },
-      responses: {
-        200: { description: 'Definitieve factuur', content: { 'application/json': { schema: Invoice } } },
-        ...errors,
-        409: { description: 'Al definitief of zonder regels', content: { 'application/json': { schema: ErrorBody } } },
-      },
-    }),
-    async (c) => {
-      const { tenantId, invoiceId } = c.req.valid('param');
-      const { data, error } = await c.var.db
-        .rpc('finalize_invoice', { p_tenant: tenantId, p_invoice: invoiceId })
-        .single<z.infer<typeof Invoice>>();
-      if (error) dbError(error);
-      const { id, number, status, issued_on, due_on, total_excl, total_vat, total_incl } = data;
-      return c.json({ id, number, status, issued_on, due_on, total_excl, total_vat, total_incl }, 200);
     },
   );
 
